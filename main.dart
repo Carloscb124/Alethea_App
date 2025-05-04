@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:dio/dio.dart';
 import 'package:intl/intl.dart';
-import 'dart:convert';
+import 'package:logger/logger.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+
+final logger = Logger(
+  printer: PrettyPrinter(colors: true, printEmojis: true, printTime: true),
+);
 
 void main() async {
   await dotenv.load(fileName: ".env");
@@ -37,7 +41,10 @@ class FakeNewsApp extends StatelessWidget {
 }
 
 class NewsService {
-  static final Dio _dio = Dio();
+  static final Dio _dio = Dio(
+    BaseOptions(headers: {'Content-Type': 'application/json'}),
+  );
+
   static final String _newsApiKey = dotenv.env['NEWS_API_KEY']!;
   static const String _newsApiUrl = 'https://newsapi.org/v2/';
 
@@ -46,6 +53,8 @@ class NewsService {
     String country = 'br',
   }) async {
     try {
+      logger.d('Fetching news for $category in $country');
+
       final response = await _dio.get(
         '${_newsApiUrl}top-headlines',
         queryParameters: {
@@ -53,8 +62,17 @@ class NewsService {
           'category': category,
           'apiKey': _newsApiKey,
           'pageSize': 20,
+          'language': 'pt',
         },
       );
+
+      logger.i('Received ${response.data['articles']?.length ?? 0} articles');
+
+      if (response.data['articles'] == null ||
+          response.data['articles'].isEmpty) {
+        logger.w('No articles found - trying without category filter');
+        return await fetchTopNews(category: 'general');
+      }
 
       return (response.data['articles'] as List).map((article) {
         return {
@@ -69,16 +87,22 @@ class NewsService {
           'tag': _mapCategoryToTag(category),
         };
       }).toList();
+    } on DioException catch (e) {
+      logger.e('Dio Error: ${e.message}', error: e.response?.data);
+      throw Exception('Erro na API: ${e.message}');
     } catch (e) {
-      throw Exception('Erro ao carregar notícias: $e');
+      logger.e('Unknown Error: $e');
+      throw Exception('Erro ao carregar notícias');
     }
   }
 
-  static String _formatDate(String dateString) {
+  static String _formatDate(String? dateString) {
+    if (dateString == null) return 'Horário desconhecido';
     try {
       final date = DateTime.parse(dateString);
       return DateFormat('HH:mm - dd/MM/yyyy').format(date);
     } catch (e) {
+      logger.w('Failed to parse date: $dateString');
       return 'Horário desconhecido';
     }
   }
@@ -110,6 +134,7 @@ class NewsService {
 }
 
 class FactCheckApi {
+  static final Dio _dio = Dio();
   static final String _factCheckApiKey =
       dotenv.env['GOOGLE_FACT_CHECK_API_KEY'] ?? '';
   static const String _factCheckUrl =
@@ -117,21 +142,24 @@ class FactCheckApi {
 
   static Future<List<dynamic>> searchClaims(String query) async {
     try {
-      final response = await http.get(
-        Uri.parse(
-          '${_factCheckUrl}claims:search?query=${Uri.encodeQueryComponent(query)}&key=$_factCheckApiKey&languageCode=pt',
-        ),
+      final response = await _dio.get(
+        '${_factCheckUrl}claims:search',
+        queryParameters: {
+          'query': query,
+          'key': _factCheckApiKey,
+          'languageCode': 'pt',
+        },
       );
 
       if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        return data['claims'] ?? [];
+        return response.data['claims'] ?? [];
       } else {
         throw Exception(
           'Falha ao carregar verificações: ${response.statusCode}',
         );
       }
     } catch (e) {
+      logger.e('FactCheck API Error: $e');
       throw Exception('Erro na conexão: $e');
     }
   }
@@ -151,7 +179,7 @@ class FactCheckApi {
       }
       return null;
     } catch (e) {
-      debugPrint('Erro na verificação: $e');
+      logger.w('Verification error: $e');
       return null;
     }
   }
@@ -199,7 +227,7 @@ class NewsVerificationService {
         };
       }
     } catch (e) {
-      debugPrint('Erro na API: $e');
+      logger.e('API verification error: $e');
     }
 
     // 3. Análise local
@@ -251,18 +279,20 @@ class NewsVerificationService {
     final combinedScore =
         (sourceScore * 0.7) + (contentAnalysis['score'] * 0.3);
 
-    if (combinedScore > 0.8)
+    if (combinedScore > 0.8) {
       return {
         'status': 'true',
         'confidence': combinedScore,
         'method': 'local_analysis',
       };
-    if (combinedScore < 0.4)
+    }
+    if (combinedScore < 0.4) {
       return {
         'status': 'fake',
         'confidence': 1.0 - combinedScore,
         'method': 'local_analysis',
       };
+    }
     return {
       'status': 'unverified',
       'confidence': 0.5,
@@ -295,19 +325,31 @@ class NewsDetailPage extends StatelessWidget {
               style: TextStyle(color: Colors.grey[600], fontSize: 14),
             ),
             const SizedBox(height: 24),
-            Container(
-              height: 200,
-              decoration: BoxDecoration(
-                color: Colors.deepPurple[100],
-                borderRadius: BorderRadius.circular(12),
-                image: DecorationImage(
-                  image:
-                      news['image'].startsWith('http')
-                          ? NetworkImage(news['image']) as ImageProvider
-                          : AssetImage(news['image']),
-                  fit: BoxFit.cover,
-                ),
-              ),
+            CachedNetworkImage(
+              imageUrl: news['image'].startsWith('http') ? news['image'] : '',
+              imageBuilder:
+                  (context, imageProvider) => Container(
+                    height: 200,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      image: DecorationImage(
+                        image: imageProvider,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                  ),
+              placeholder:
+                  (context, url) => Container(
+                    height: 200,
+                    color: Colors.grey[200],
+                    child: const Center(child: CircularProgressIndicator()),
+                  ),
+              errorWidget:
+                  (context, url, error) => Container(
+                    height: 200,
+                    color: Colors.grey[200],
+                    child: const Center(child: Icon(Icons.image_not_supported)),
+                  ),
             ),
             const SizedBox(height: 24),
             Text(
@@ -424,6 +466,7 @@ class _HomePageState extends State<HomePage> {
   bool _isLoading = true;
   final TextEditingController _searchController = TextEditingController();
   List<Map<String, dynamic>> _allNews = [];
+  List<Map<String, dynamic>> _filteredNews = [];
 
   final List<String> _categories = [
     'Geral',
@@ -446,12 +489,17 @@ class _HomePageState extends State<HomePage> {
     try {
       final news = await NewsService.fetchTopNews(
         category: _getApiCategory(_selectedCategory),
+        country: 'br',
       );
-      setState(() => _allNews = news);
+      setState(() {
+        _allNews = news;
+        _filteredNews = news;
+      });
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Erro ao carregar notícias: ${e.toString()}')),
-      );
+      logger.e('Load news error: $e');
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Erro: ${e.toString()}')));
     } finally {
       setState(() => _isLoading = false);
     }
@@ -478,16 +526,8 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  List<Map<String, dynamic>> get _filteredNews {
-    if (_selectedCategory == 0) return _allNews;
-    return _allNews
-        .where((news) => news['tag'] == _categories[_selectedCategory])
-        .toList();
-  }
-
   void _verifyNews(int index) async {
     final newsIndex = _allNews.indexOf(_filteredNews[index]);
-
     setState(() {
       _allNews[newsIndex]['verified'] = 'analisando';
       _allNews[newsIndex]['verificationDetails'] = null;
@@ -507,11 +547,25 @@ class _HomePageState extends State<HomePage> {
                 : null;
       });
     } catch (e) {
+      logger.e('Verify news error: $e');
       setState(() => _allNews[newsIndex]['verified'] = null);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Erro na verificação: ${e.toString()}')),
       );
     }
+  }
+
+  void _searchNews(String query) {
+    setState(() {
+      _filteredNews =
+          _allNews
+              .where(
+                (news) =>
+                    news['title'].toLowerCase().contains(query.toLowerCase()) ||
+                    news['content'].toLowerCase().contains(query.toLowerCase()),
+              )
+              .toList();
+    });
   }
 
   @override
@@ -545,6 +599,13 @@ class _HomePageState extends State<HomePage> {
         decoration: InputDecoration(
           hintText: 'Pesquisar notícias...',
           prefixIcon: const Icon(Icons.search),
+          suffixIcon: IconButton(
+            icon: const Icon(Icons.clear),
+            onPressed: () {
+              _searchController.clear();
+              _searchNews('');
+            },
+          ),
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(10),
             borderSide: BorderSide.none,
@@ -552,76 +613,86 @@ class _HomePageState extends State<HomePage> {
           filled: true,
           fillColor: Colors.white,
         ),
-        onSubmitted: (value) => _searchNews(value),
+        onChanged: _searchNews,
       ),
     );
   }
 
   Widget _buildCategorySelector() {
-    return SizedBox(
-      height: 40,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: _categories.length,
-        itemBuilder: (context, index) {
-          return Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: ChoiceChip(
-              label: Text(_categories[index]),
-              selected: _selectedCategory == index,
-              onSelected: (selected) {
-                setState(() => _selectedCategory = index);
-                _loadNews();
-              },
-            ),
-          );
-        },
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Row(
+          children: List.generate(_categories.length, (index) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: FilterChip(
+                label: Text(_categories[index]),
+                selected: _selectedCategory == index,
+                onSelected: (selected) {
+                  setState(() => _selectedCategory = index);
+                  _loadNews();
+                },
+                selectedColor: Colors.deepPurple[200],
+                checkmarkColor: Colors.deepPurple,
+              ),
+            );
+          }),
+        ),
       ),
     );
   }
 
   Widget _buildNewsList() {
-    return ListView.builder(
-      itemCount: _filteredNews.length,
-      itemBuilder: (context, index) {
-        final news = _filteredNews[index];
-        return Card(
-          margin: const EdgeInsets.all(8),
-          child: InkWell(
-            onTap:
-                () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => NewsDetailPage(news: news),
+    return _filteredNews.isEmpty
+        ? const Center(child: Text('Nenhuma notícia encontrada'))
+        : ListView.builder(
+          itemCount: _filteredNews.length,
+          itemBuilder: (context, index) {
+            final news = _filteredNews[index];
+            return Card(
+              margin: const EdgeInsets.all(8),
+              elevation: 2,
+              child: InkWell(
+                onTap:
+                    () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => NewsDetailPage(news: news),
+                      ),
+                    ),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _buildNewsImage(news),
+                      _buildNewsContent(news, index),
+                    ],
                   ),
                 ),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildNewsImage(news),
-                  _buildNewsContent(news, index),
-                ],
               ),
-            ),
-          ),
+            );
+          },
         );
-      },
-    );
   }
 
   Widget _buildNewsImage(Map<String, dynamic> news) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
-      child: Image.network(
-        news['image'],
+      child: CachedNetworkImage(
+        imageUrl: news['image'].startsWith('http') ? news['image'] : '',
         height: 180,
         width: double.infinity,
         fit: BoxFit.cover,
-        errorBuilder:
-            (_, __, ___) => Container(
-              height: 180,
+        placeholder:
+            (context, url) => Container(
+              color: Colors.grey[200],
+              child: const Center(child: CircularProgressIndicator()),
+            ),
+        errorWidget:
+            (context, url, error) => Container(
               color: Colors.grey[200],
               child: const Center(child: Icon(Icons.image_not_supported)),
             ),
@@ -639,11 +710,14 @@ class _HomePageState extends State<HomePage> {
             children: [
               Icon(news['icon'] ?? Icons.article, size: 20),
               const SizedBox(width: 8),
-              Text(
-                news['source'],
-                style: const TextStyle(fontWeight: FontWeight.bold),
+              Expanded(
+                child: Text(
+                  news['source'],
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-              const Spacer(),
+              const SizedBox(width: 8),
               Text(news['time'].split(' - ')[0]),
             ],
           ),
@@ -655,7 +729,10 @@ class _HomePageState extends State<HomePage> {
           const SizedBox(height: 8),
           Row(
             children: [
-              Chip(label: Text(news['tag'])),
+              Chip(
+                label: Text(news['tag']),
+                backgroundColor: Colors.deepPurple[50],
+              ),
               const Spacer(),
               _buildVerificationButton(news, index),
             ],
@@ -697,19 +774,14 @@ class _HomePageState extends State<HomePage> {
                   : Colors.deepPurple,
         ),
       ),
+      style: OutlinedButton.styleFrom(
+        side: BorderSide(
+          color:
+              isVerified
+                  ? (isTrue ? Colors.green : Colors.red)
+                  : Colors.deepPurple,
+        ),
+      ),
     );
-  }
-
-  void _searchNews(String query) {
-    // Implementação simplificada - pode ser melhorada
-    setState(() {
-      _allNews =
-          _allNews
-              .where(
-                (news) =>
-                    news['title'].toLowerCase().contains(query.toLowerCase()),
-              )
-              .toList();
-    });
   }
 }
