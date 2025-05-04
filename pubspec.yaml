@@ -1,0 +1,31 @@
+name: alethea_novo
+description: "Aplicativo de verificação de notícias em tempo real"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.7.2 <4.0.0"  # Flexibilize a versão do SDK
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_dotenv: ^5.1.0
+  url_launcher: ^6.1.11
+  dio: ^5.3.2                  # Mantido como principal cliente HTTP
+  intl: ^0.18.1               # Para formatação de datas
+  cached_network_image: ^3.3.0 # Para cache de imagens
+  pull_to_refresh: ^2.0.0     # Para atualização puxando a tela
+  logger: ^2.5.0              # Adicionado para logs melhores
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - .env
+    - assets/images/  # Forma mais clean de incluir todos os assets da pasta
